@@ -3,9 +3,22 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
-# === МОДЕЛЬ (без scipy) ===
+# === МОДЕЛЬ С УЧЕТОМ РЕАЛЬНЫХ РАЗМЕРОВ ЗЕРНА ПО ГОСТ 5639–82 ===
 def B_from_G(G):
-    return 2 ** ((G - 1) / 2)
+    """Плотность границ зёрен по номеру ГОСТ 5639–82 через среднюю площадь сечения зерна"""
+    a = {
+        3: 0.0156,   # мм²
+        5: 0.00390,
+        8: 0.00049,
+        9: 0.000244,
+        10: 0.000122,
+        # Можно добавить другие номера
+    }
+    if G not in a:
+        st.warning(f"Номер зерна {G} не найден в таблице. Используется G=10.")
+        return 1.0
+    a_ref = 0.000122  # референсная площадь для G=10
+    return np.sqrt(a_ref / a[G])
 
 def f_sigma(t, T_C, G, f_inf=0.06, k0=1.12e-4, m=2.85, n=0.92, Q=185000, R=8.314):
     T_K = T_C + 273.15
@@ -34,12 +47,9 @@ def solve_T_from_f(f_target, t, G, f_inf=0.06, k0=1.12e-4, m=2.85, n=0.92, Q=185
             low = mid
     return (low + high) / 2.0
 
-# === ПАРАМЕТРЫ МОДЕЛИ (можно настраивать) ===
+# === STREAMLIT UI ===
 st.set_page_config(page_title="σ-фаза: 12Х18Н12Т", layout="wide")
 st.title("Калькулятор выделения σ-фазы в стали 12Х18Н12Т")
-
-# Часто используемые номера зерна
-COMMON_GRAINS = [3, 5, 8, 9, 10]
 
 with st.sidebar:
     st.header("Параметры модели")
@@ -49,32 +59,21 @@ with st.sidebar:
     n = st.number_input("n (показатель Аврами)", 0.1, 3.0, 0.92, 0.05)
     Q = st.number_input("Q (Дж/моль)", 100000, 300000, 185000, 1000)
 
-# === ВКЛАДКИ ===
-tab1, tab2, tab3 = st.tabs(["Прямой расчёт", "Обратный расчёт", "Валидация на данных"])
+tab1, tab2, tab3 = st.tabs(["Прямой расчёт", "Обратный расчёт", "Валидация"])
 
-# --- Прямой расчёт ---
 with tab1:
     st.subheader("Рассчитать долю σ-фазы")
     col1, col2, col3 = st.columns(3)
-    use_preset = col1.checkbox("Использовать стандартные номера зерна", True)
-    if use_preset:
-        G = col1.selectbox("Номер зерна ASTM (G)", COMMON_GRAINS, index=4)  # по умолчанию 10
-    else:
-        G = col1.number_input("Номер зерна ASTM (G)", 1, 15, 10)
+    G = col1.selectbox("Номер зерна по ГОСТ 5639–82", [3, 5, 8, 9, 10], index=4)
     T = col2.number_input("Температура (°C)", 550, 900, 600)
     t = col3.number_input("Время (ч)", 100, 200000, 10000)
     f_calc = f_sigma(t, T, G, f_inf, k0, m, n, Q) * 100
     st.success(f"Расчётная доля σ-фазы: **{f_calc:.2f} %**")
 
-# --- Обратный расчёт ---
 with tab2:
     st.subheader("Оценить температуру по доле σ-фазы")
     col1, col2, col3 = st.columns(3)
-    use_preset2 = col1.checkbox("Использовать стандартные номера зерна", True, key="preset2")
-    if use_preset2:
-        G2 = col1.selectbox("Номер зерна ASTM (G)", COMMON_GRAINS, index=4, key="G_sel2")
-    else:
-        G2 = col1.number_input("Номер зерна ASTM (G)", 1, 15, 10, key="G_num2")
+    G2 = col1.selectbox("Номер зерна по ГОСТ 5639–82", [3, 5, 8, 9, 10], index=4, key="G2")
     t2 = col2.number_input("Время эксплуатации (ч)", 100, 200000, 100000, key="t2")
     f2 = col3.number_input("Измеренная доля σ-фазы (%)", 0.1, 20.0, 3.5, key="f2")
     T_est = solve_T_from_f(f2 / 100.0, t2, G2, f_inf, k0, m, n, Q)
@@ -83,10 +82,9 @@ with tab2:
     else:
         st.success(f"Оценка температуры: **{T_est:.1f} °C**")
 
-# --- Валидация ---
 with tab3:
     st.subheader("Загрузите экспериментальные данные")
-    st.markdown("Формат: CSV или XLSX с колонками: `G`, `T`, `t`, `f_exp (%)`")
+    st.markdown("Формат: CSV/XLSX с колонками: `G`, `T`, `t`, `f_exp (%)`")
     uploaded = st.file_uploader("Файл данных", type=["csv", "xlsx"])
     if uploaded:
         try:
@@ -110,7 +108,14 @@ with tab3:
                 ax.plot([0, df['f_exp (%)'].max()*1.1], [0, df['f_exp (%)'].max()*1.1], 'r--')
                 ax.set_xlabel('Эксперимент (%)')
                 ax.set_ylabel('Расчёт (%)')
-                ax.set_title('Сравнение')
+                ax.set_title('Сравнение эксперимента и модели')
                 st.pyplot(fig)
         except Exception as e:
             st.error(f"Ошибка: {e}")
+
+st.markdown("---")
+st.caption("""
+**Основа модели**: модифицированное уравнение Аврами с учётом плотности границ зёрен по ГОСТ 5639–82.  
+Коэффициенты подобраны по экспериментальным данным для стали 12Х18Н12Т.  
+Диапазон применимости: 550–900 °C, время до 200 000 ч.
+""")
