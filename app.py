@@ -3,20 +3,20 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
-# === МОДЕЛЬ С УЧЕТОМ РЕАЛЬНЫХ РАЗМЕРОВ ЗЕРНА ПО ГОСТ 5639–82 ===
+# === ФИЗИЧЕСКАЯ МОДЕЛЬ ПО ГОСТ 5639–82 ===
 def B_from_G(G):
-    """Плотность границ зёрен по номеру ГОСТ 5639–82 через среднюю площадь сечения зерна (мм²)"""
+    """Плотность границ зёрен через среднюю площадь сечения a (мм²) по ГОСТ 5639–82"""
     a = {
         3: 0.0156,
         5: 0.00390,
-        8: 0.00049,   # ← исправлено!
+        8: 0.00049,   # ← исправлено согласно вашим данным
         9: 0.000244,
         10: 0.000122,
     }
     if G not in a:
         st.warning(f"Номер зерна {G} не найден. Используется G=10.")
         return 1.0
-    a_ref = 0.000122  # референс для G=10
+    a_ref = 0.000122  # для G=10
     return np.sqrt(a_ref / a[G])
 
 def f_sigma(t, T_C, G, f_inf=0.06, k0=1.12e-4, m=2.85, n=0.92, Q=185000, R=8.314):
@@ -46,7 +46,7 @@ def solve_T_from_f(f_target, t, G, f_inf=0.06, k0=1.12e-4, m=2.85, n=0.92, Q=185
             low = mid
     return (low + high) / 2.0
 
-# === UI ===
+# === ИНТЕРФЕЙС ===
 st.set_page_config(page_title="σ-фаза: 12Х18Н12Т", layout="wide")
 st.title("Калькулятор выделения σ-фазы в стали 12Х18Н12Т")
 
@@ -76,7 +76,7 @@ with tab2:
     col1, col2, col3 = st.columns(3)
     G2 = col1.selectbox("Номер зерна по ГОСТ 5639–82", [3, 5, 8, 9, 10], index=4, key="G2")
     t2 = col2.number_input("Время эксплуатации (ч)", 100, 200000, 100000, key="t2")
-    f2 = col3.number_input("Измеренная доля σ-фазы (%)", 0.1, 20.0, 3.5, key="f2")
+    f2 = col3.number_input("Измеренная доля σ-фазы (%)", 0.01, 20.0, 3.5, key="f2")
     T_est = solve_T_from_f(f2 / 100.0, t2, G2, f_inf, k0, m, n, Q)
     if T_est is None:
         st.error("Температура вне диапазона 550–900°C или доля > f_∞")
@@ -100,13 +100,15 @@ with tab3:
                     df = pd.read_csv(uploaded)
                 else:
                     df = pd.read_excel(uploaded)
+                if "Исключить" not in df.columns:
+                    df["Исключить"] = False
             except Exception as e:
                 st.error(f"Ошибка при чтении файла: {e}")
     else:
         st.markdown("Введите экспериментальные данные:")
         example_data = pd.DataFrame([
-            {"G": 10, "T": 600, "t": 2000, "f_exp (%)": 1.26},
-            {"G": 8, "T": 650, "t": 4000, "f_exp (%)": 1.20},
+            {"G": 10, "T": 600, "t": 2000, "f_exp (%)": 1.26, "Исключить": False},
+            {"G": 8, "T": 600, "t": 4000, "f_exp (%)": 0.68, "Исключить": True},  # пример выброса
         ])
         df = st.data_editor(
             example_data,
@@ -115,9 +117,17 @@ with tab3:
                 "G": st.column_config.NumberColumn("Номер зерна (ГОСТ)", min_value=1, max_value=15, step=1),
                 "T": st.column_config.NumberColumn("Температура (°C)", min_value=500, max_value=950, step=10),
                 "t": st.column_config.NumberColumn("Время (ч)", min_value=100, max_value=200000, step=100),
-                "f_exp (%)": st.column_config.NumberColumn("Доля σ-фазы (%)", min_value=0.0, max_value=20.0, step=0.1),
+                "f_exp (%)": st.column_config.NumberColumn(
+                    "Доля σ-фазы (%)",
+                    min_value=0.0,
+                    max_value=20.0,
+                    step=0.01,      # ← точность до сотых!
+                    format="%.2f"
+                ),
+                "Исключить": st.column_config.CheckboxColumn("Исключить", default=False),
             },
-            use_container_width=True
+            use_container_width=True,
+            hide_index=True
         )
     if df is not None and not df.empty:
         required = {'G', 'T', 't', 'f_exp (%)'}
@@ -125,24 +135,28 @@ with tab3:
             st.error(f"Таблица должна содержать колонки: {required}")
         else:
             df = df.astype({'G': int, 'T': float, 't': float, 'f_exp (%)': float})
-            df['f_calc (%)'] = df.apply(
-                lambda row: f_sigma(row['t'], row['T'], row['G'], f_inf, k0, m, n, Q) * 100,
-                axis=1
-            )
-            df['Ошибка (%)'] = np.abs(df['f_calc (%)'] - df['f_exp (%)'])
-            st.dataframe(df.round(3))
-            fig, ax = plt.subplots()
-            ax.scatter(df['f_exp (%)'], df['f_calc (%)'], alpha=0.7, s=60)
-            ax.plot([0, df['f_exp (%)'].max()*1.1], [0, df['f_exp (%)'].max()*1.1], 'r--')
-            ax.set_xlabel('Эксперимент (%)')
-            ax.set_ylabel('Расчёт (%)')
-            ax.set_title('Сравнение эксперимента и модели')
-            ax.grid(True, linestyle='--', alpha=0.5)
-            st.pyplot(fig)
+            df_filtered = df[df["Исключить"] == False].copy()
+            if df_filtered.empty:
+                st.warning("Все строки исключены.")
+            else:
+                df_filtered['f_calc (%)'] = df_filtered.apply(
+                    lambda row: f_sigma(row['t'], row['T'], row['G'], f_inf, k0, m, n, Q) * 100,
+                    axis=1
+                )
+                df_filtered['Ошибка (%)'] = np.abs(df_filtered['f_calc (%)'] - df_filtered['f_exp (%)'])
+                st.dataframe(df_filtered.round(3))
+                fig, ax = plt.subplots()
+                ax.scatter(df_filtered['f_exp (%)'], df_filtered['f_calc (%)'], alpha=0.7, s=60)
+                ax.plot([0, df_filtered['f_exp (%)'].max()*1.1], [0, df_filtered['f_exp (%)'].max()*1.1], 'r--')
+                ax.set_xlabel('Эксперимент (%)')
+                ax.set_ylabel('Расчёт (%)')
+                ax.set_title('Сравнение (исключённые точки не учитываются)')
+                ax.grid(True, linestyle='--', alpha=0.5)
+                st.pyplot(fig)
 
 st.markdown("---")
 st.caption("""
 Модель основана на уравнении Аврами с учётом плотности границ зёрен по ГОСТ 5639–82.  
-Коэффициенты подобраны по данным для стали 12Х18Н12Т (зерно №3, 5, 8, 9, 10).  
+Коэффициенты подобраны по экспериментальным данным для стали 12Х18Н12Т.  
 Диапазон: 550–900 °C, время до 200 000 ч.
 """)
