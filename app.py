@@ -2,32 +2,29 @@ import streamlit as st
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import re
 
-# === МОДЕЛЬ ПО ГОСТ 5639–82 С ОБНОВЛЁННЫМИ КОЭФФИЦИЕНТАМИ ===
+# === МОДЕЛЬ ПО ГОСТ 5639–82 ===
 def B_from_G(G):
-    """Плотность границ зёрен через среднюю площадь сечения a (мм²) по ГОСТ"""
     a = {
         3: 0.0156,
         5: 0.00390,
-        8: 0.00049,   # ← исправлено
+        8: 0.00049,
         9: 0.000244,
         10: 0.000122,
     }
     if G not in a:
-        st.warning(f"Номер зерна {G} не найден. Используется G=10.")
         return 1.0
     a_ref = 0.000122
     return np.sqrt(a_ref / a[G])
 
-def f_sigma(t, T_C, G, f_inf=0.098, k0=3.1e-5, m=2.41, n=0.87, Q=142000, R=8.314):
-    """Расчёт доли σ-фазы (в долях)"""
+def f_sigma(t, T_C, G, f_inf=0.062, k0=2.05e-3, m=2.31, n=0.80, Q=104000, R=8.314):
     T_K = T_C + 273.15
     B = B_from_G(G)
     exponent = -k0 * (B ** m) * (t ** n) * np.exp(-Q / (R * T_K))
     return f_inf * (1 - np.exp(exponent))
 
-def solve_T_from_f(f_target, t, G, f_inf=0.098, k0=3.1e-5, m=2.41, n=0.87, Q=142000, R=8.314):
-    """Обратный расчёт температуры (°C) без scipy"""
+def solve_T_from_f(f_target, t, G, f_inf=0.062, k0=2.05e-3, m=2.31, n=0.80, Q=104000, R=8.314):
     if f_target <= 0 or f_target >= f_inf:
         return None
     def model_f(T_C):
@@ -48,6 +45,31 @@ def solve_T_from_f(f_target, t, G, f_inf=0.098, k0=3.1e-5, m=2.41, n=0.87, Q=142
             low = mid
     return (low + high) / 2.0
 
+# === ОБРАБОТКА ФАЙЛА С БЛОКАМИ "8 НОМЕР" ===
+def parse_custom_excel(df_raw):
+    """Преобразует файл с блоками '8 номер', '9 номер' в плоскую таблицу с колонкой G"""
+    rows = []
+    current_G = None
+    for idx, row in df_raw.iterrows():
+        # Ищем строку вида "8 номер"
+        first_cell = str(row.iloc[0]).strip()
+        if re.match(r'\d+\s+номер', first_cell):
+            current_G = int(re.search(r'\d+', first_cell).group())
+            continue
+        # Ищем заголовки
+        if 'Температура' in first_cell or 'G' in first_cell:
+            continue
+        # Данные
+        try:
+            T = float(row.iloc[0])
+            t = float(row.iloc[1])
+            f = float(row.iloc[2])
+            if current_G is not None:
+                rows.append({"G": current_G, "T": T, "t": t, "f_exp (%)": f})
+        except (ValueError, TypeError):
+            continue
+    return pd.DataFrame(rows)
+
 # === ИНТЕРФЕЙС ===
 st.set_page_config(page_title="σ-фаза: 12Х18Н12Т", layout="wide")
 st.title("Калькулятор выделения σ-фазы в стали 12Х18Н12Т")
@@ -57,11 +79,11 @@ if 'df_current' not in st.session_state:
 
 with st.sidebar:
     st.header("Параметры модели")
-    f_inf = st.number_input("f_∞ (равновесная доля)", 0.01, 0.2, 0.098, 0.001)
-    k0 = st.number_input("k₀", 1e-6, 1.0, 3.1e-5, format="%.2e")
-    m = st.number_input("m (влияние зерна)", 0.0, 5.0, 2.41, 0.01)
-    n = st.number_input("n (показатель Аврами)", 0.1, 3.0, 0.87, 0.01)
-    Q = st.number_input("Q (Дж/моль)", 100000, 300000, 142000, 1000)
+    f_inf = st.number_input("f_∞ (равновесная доля)", 0.01, 0.2, 0.062, 0.001)
+    k0 = st.number_input("k₀", 1e-6, 1.0, 2.05e-3, format="%.2e")
+    m = st.number_input("m (влияние зерна)", 0.0, 5.0, 2.31, 0.01)
+    n = st.number_input("n (показатель Аврами)", 0.1, 3.0, 0.80, 0.01)
+    Q = st.number_input("Q (Дж/моль)", 100000, 300000, 104000, 1000)
 
 tab1, tab2, tab3 = st.tabs(["Прямой расчёт", "Обратный расчёт", "Валидация"])
 
@@ -88,7 +110,7 @@ with tab2:
     else:
         st.success(f"Оценка температуры: **{T_est:.1f} °C**")
 
-# --- Валидация с сохранением/загрузкой проекта ---
+# --- Валидация ---
 with tab3:
     st.subheader("Валидация модели на экспериментальных данных")
     
@@ -145,9 +167,17 @@ with tab3:
             if uploaded:
                 try:
                     if uploaded.name.endswith('.csv'):
-                        df = pd.read_csv(uploaded)
+                        df_raw = pd.read_csv(uploaded, header=None)
                     else:
-                        df = pd.read_excel(uploaded)
+                        df_raw = pd.read_excel(uploaded, header=None)
+                    df = parse_custom_excel(df_raw)
+                    if df.empty:
+                        # Попытка стандартного чтения
+                        if uploaded.name.endswith('.csv'):
+                            df = pd.read_csv(uploaded)
+                        else:
+                            df = pd.read_excel(uploaded, header=1)
+                        df = df.dropna(how='all').reset_index(drop=True)
                     if "Исключить" not in df.columns:
                         df["Исключить"] = False
                 except Exception as e:
@@ -182,7 +212,7 @@ with tab3:
         st.session_state.df_current = df.copy()
         required = {'G', 'T', 't', 'f_exp (%)'}
         if not required <= set(df.columns):
-            st.error(f"Таблица должна содержать колонки: {required}")
+            st.error(f"Таблица должна содержать колонки: {required}. Текущие: {list(df.columns)}")
         else:
             df['G'] = pd.to_numeric(df['G'], errors='coerce').astype('Int64')
             df['T'] = pd.to_numeric(df['T'], errors='coerce')
