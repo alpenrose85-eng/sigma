@@ -3,20 +3,19 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
-# === ФИЗИЧЕСКАЯ МОДЕЛЬ ПО ГОСТ 5639–82 ===
+# === МОДЕЛЬ ПО ГОСТ 5639–82 ===
 def B_from_G(G):
-    """Плотность границ зёрен через среднюю площадь сечения a (мм²) по ГОСТ 5639–82"""
     a = {
         3: 0.0156,
         5: 0.00390,
-        8: 0.00049,   # ← исправлено согласно вашим данным
+        8: 0.00049,   # ← исправлено
         9: 0.000244,
         10: 0.000122,
     }
     if G not in a:
         st.warning(f"Номер зерна {G} не найден. Используется G=10.")
         return 1.0
-    a_ref = 0.000122  # для G=10
+    a_ref = 0.000122
     return np.sqrt(a_ref / a[G])
 
 def f_sigma(t, T_C, G, f_inf=0.06, k0=1.12e-4, m=2.85, n=0.92, Q=185000, R=8.314):
@@ -49,6 +48,10 @@ def solve_T_from_f(f_target, t, G, f_inf=0.06, k0=1.12e-4, m=2.85, n=0.92, Q=185
 # === ИНТЕРФЕЙС ===
 st.set_page_config(page_title="σ-фаза: 12Х18Н12Т", layout="wide")
 st.title("Калькулятор выделения σ-фазы в стали 12Х18Н12Т")
+
+# Инициализация session_state
+if 'df_current' not in st.session_state:
+    st.session_state.df_current = pd.DataFrame()
 
 with st.sidebar:
     st.header("Параметры модели")
@@ -83,53 +86,99 @@ with tab2:
     else:
         st.success(f"Оценка температуры: **{T_est:.1f} °C**")
 
-# --- Валидация ---
+# --- Валидация с сохранением/загрузкой проекта ---
 with tab3:
     st.subheader("Валидация модели на экспериментальных данных")
+    
+    col_load, col_save = st.columns(2)
+    with col_load:
+        project_file = st.file_uploader("Загрузить проект (.json)", type=["json"])
+    with col_save:
+        if st.button("Сохранить проект (.json)"):
+            if not st.session_state.df_current.empty:
+                project_data = {
+                    "model_params": {
+                        "f_inf": f_inf,
+                        "k0": k0,
+                        "m": m,
+                        "n": n,
+                        "Q": Q
+                    },
+                    "data": st.session_state.df_current.to_dict(orient="records")
+                }
+                project_json = pd.io.json.dumps(project_data, indent=2)
+                st.download_button(
+                    label="Скачать проект.json",
+                    data=project_json,
+                    file_name="sigma_project.json",
+                    mime="application/json"
+                )
+            else:
+                st.warning("Нет данных для сохранения.")
+    
     input_method = st.radio(
         "Способ ввода данных:",
         ("Загрузить файл (CSV/XLSX)", "Ввести вручную"),
         horizontal=True
     )
+    
     df = None
-    if input_method == "Загрузить файл (CSV/XLSX)":
-        uploaded = st.file_uploader("Файл данных", type=["csv", "xlsx"])
-        if uploaded:
-            try:
-                if uploaded.name.endswith('.csv'):
-                    df = pd.read_csv(uploaded)
-                else:
-                    df = pd.read_excel(uploaded)
-                if "Исключить" not in df.columns:
-                    df["Исключить"] = False
-            except Exception as e:
-                st.error(f"Ошибка при чтении файла: {e}")
-    else:
-        st.markdown("Введите экспериментальные данные:")
-        example_data = pd.DataFrame([
-            {"G": 10, "T": 600, "t": 2000, "f_exp (%)": 1.26, "Исключить": False},
-            {"G": 8, "T": 600, "t": 4000, "f_exp (%)": 0.68, "Исключить": True},  # пример выброса
-        ])
-        df = st.data_editor(
-            example_data,
-            num_rows="dynamic",
-            column_config={
-                "G": st.column_config.NumberColumn("Номер зерна (ГОСТ)", min_value=1, max_value=15, step=1),
-                "T": st.column_config.NumberColumn("Температура (°C)", min_value=500, max_value=950, step=10),
-                "t": st.column_config.NumberColumn("Время (ч)", min_value=100, max_value=200000, step=100),
-                "f_exp (%)": st.column_config.NumberColumn(
-                    "Доля σ-фазы (%)",
-                    min_value=0.0,
-                    max_value=20.0,
-                    step=0.01,      # ← точность до сотых!
-                    format="%.2f"
-                ),
-                "Исключить": st.column_config.CheckboxColumn("Исключить", default=False),
-            },
-            use_container_width=True,
-            hide_index=True
-        )
+    
+    # Загрузка проекта
+    if project_file:
+        try:
+            project = pd.io.json.loads(project_file.read())
+            f_inf = project["model_params"]["f_inf"]
+            k0 = project["model_params"]["k0"]
+            m = project["model_params"]["m"]
+            n = project["model_params"]["n"]
+            Q = project["model_params"]["Q"]
+            df = pd.DataFrame(project["data"])
+            st.success("Проект загружен!")
+        except Exception as e:
+            st.error(f"Ошибка при загрузке проекта: {e}")
+    
+    if df is None:
+        if input_method == "Загрузить файл (CSV/XLSX)":
+            uploaded = st.file_uploader("Файл данных", type=["csv", "xlsx"], key="file_uploader")
+            if uploaded:
+                try:
+                    if uploaded.name.endswith('.csv'):
+                        df = pd.read_csv(uploaded)
+                    else:
+                        df = pd.read_excel(uploaded)
+                    if "Исключить" not in df.columns:
+                        df["Исключить"] = False
+                except Exception as e:
+                    st.error(f"Ошибка при чтении файла: {e}")
+        else:
+            st.markdown("Введите экспериментальные данные:")
+            example_data = pd.DataFrame([
+                {"G": 10, "T": 600, "t": 2000, "f_exp (%)": 1.26, "Исключить": False},
+                {"G": 8, "T": 600, "t": 4000, "f_exp (%)": 0.68, "Исключить": True},
+            ])
+            df = st.data_editor(
+                example_data,
+                num_rows="dynamic",
+                column_config={
+                    "G": st.column_config.NumberColumn("Номер зерна (ГОСТ)", min_value=1, max_value=15, step=1),
+                    "T": st.column_config.NumberColumn("Температура (°C)", min_value=500, max_value=950, step=10),
+                    "t": st.column_config.NumberColumn("Время (ч)", min_value=100, max_value=200000, step=100),
+                    "f_exp (%)": st.column_config.NumberColumn(
+                        "Доля σ-фазы (%)",
+                        min_value=0.0,
+                        max_value=20.0,
+                        step=0.01,
+                        format="%.2f"
+                    ),
+                    "Исключить": st.column_config.CheckboxColumn("Исключить", default=False),
+                },
+                use_container_width=True,
+                hide_index=True
+            )
+    
     if df is not None and not df.empty:
+        st.session_state.df_current = df.copy()
         required = {'G', 'T', 't', 'f_exp (%)'}
         if not required <= set(df.columns):
             st.error(f"Таблица должна содержать колонки: {required}")
