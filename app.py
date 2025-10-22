@@ -3,8 +3,9 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
-# === МОДЕЛЬ ПО ГОСТ 5639–82 ===
+# === МОДЕЛЬ ПО ГОСТ 5639–82 С ОБНОВЛЁННЫМИ КОЭФФИЦИЕНТАМИ ===
 def B_from_G(G):
+    """Плотность границ зёрен через среднюю площадь сечения a (мм²) по ГОСТ"""
     a = {
         3: 0.0156,
         5: 0.00390,
@@ -18,13 +19,15 @@ def B_from_G(G):
     a_ref = 0.000122
     return np.sqrt(a_ref / a[G])
 
-def f_sigma(t, T_C, G, f_inf=0.06, k0=1.12e-4, m=2.85, n=0.92, Q=185000, R=8.314):
+def f_sigma(t, T_C, G, f_inf=0.098, k0=3.1e-5, m=2.41, n=0.87, Q=142000, R=8.314):
+    """Расчёт доли σ-фазы (в долях)"""
     T_K = T_C + 273.15
     B = B_from_G(G)
     exponent = -k0 * (B ** m) * (t ** n) * np.exp(-Q / (R * T_K))
     return f_inf * (1 - np.exp(exponent))
 
-def solve_T_from_f(f_target, t, G, f_inf=0.06, k0=1.12e-4, m=2.85, n=0.92, Q=185000, R=8.314):
+def solve_T_from_f(f_target, t, G, f_inf=0.098, k0=3.1e-5, m=2.41, n=0.87, Q=142000, R=8.314):
+    """Обратный расчёт температуры (°C) без scipy"""
     if f_target <= 0 or f_target >= f_inf:
         return None
     def model_f(T_C):
@@ -49,17 +52,16 @@ def solve_T_from_f(f_target, t, G, f_inf=0.06, k0=1.12e-4, m=2.85, n=0.92, Q=185
 st.set_page_config(page_title="σ-фаза: 12Х18Н12Т", layout="wide")
 st.title("Калькулятор выделения σ-фазы в стали 12Х18Н12Т")
 
-# Инициализация session_state
 if 'df_current' not in st.session_state:
     st.session_state.df_current = pd.DataFrame()
 
 with st.sidebar:
     st.header("Параметры модели")
-    f_inf = st.number_input("f_∞ (равновесная доля)", 0.01, 0.2, 0.06, 0.01)
-    k0 = st.number_input("k₀", 1e-6, 1.0, 1.12e-4, format="%.2e")
-    m = st.number_input("m (влияние зерна)", 0.0, 5.0, 2.85, 0.05)
-    n = st.number_input("n (показатель Аврами)", 0.1, 3.0, 0.92, 0.05)
-    Q = st.number_input("Q (Дж/моль)", 100000, 300000, 185000, 1000)
+    f_inf = st.number_input("f_∞ (равновесная доля)", 0.01, 0.2, 0.098, 0.001)
+    k0 = st.number_input("k₀", 1e-6, 1.0, 3.1e-5, format="%.2e")
+    m = st.number_input("m (влияние зерна)", 0.0, 5.0, 2.41, 0.01)
+    n = st.number_input("n (показатель Аврами)", 0.1, 3.0, 0.87, 0.01)
+    Q = st.number_input("Q (Дж/моль)", 100000, 300000, 142000, 1000)
 
 tab1, tab2, tab3 = st.tabs(["Прямой расчёт", "Обратный расчёт", "Валидация"])
 
@@ -124,7 +126,6 @@ with tab3:
     
     df = None
     
-    # Загрузка проекта
     if project_file:
         try:
             project = pd.io.json.loads(project_file.read())
@@ -183,29 +184,38 @@ with tab3:
         if not required <= set(df.columns):
             st.error(f"Таблица должна содержать колонки: {required}")
         else:
-            df = df.astype({'G': int, 'T': float, 't': float, 'f_exp (%)': float})
-            df_filtered = df[df["Исключить"] == False].copy()
-            if df_filtered.empty:
-                st.warning("Все строки исключены.")
+            df['G'] = pd.to_numeric(df['G'], errors='coerce').astype('Int64')
+            df['T'] = pd.to_numeric(df['T'], errors='coerce')
+            df['t'] = pd.to_numeric(df['t'], errors='coerce')
+            df['f_exp (%)'] = pd.to_numeric(df['f_exp (%)'], errors='coerce')
+            df = df.dropna(subset=['G', 'T', 't', 'f_exp (%)'])
+            
+            if df.empty:
+                st.warning("Не удалось преобразовать данные.")
             else:
-                df_filtered['f_calc (%)'] = df_filtered.apply(
-                    lambda row: f_sigma(row['t'], row['T'], row['G'], f_inf, k0, m, n, Q) * 100,
-                    axis=1
-                )
-                df_filtered['Ошибка (%)'] = np.abs(df_filtered['f_calc (%)'] - df_filtered['f_exp (%)'])
-                st.dataframe(df_filtered.round(3))
-                fig, ax = plt.subplots()
-                ax.scatter(df_filtered['f_exp (%)'], df_filtered['f_calc (%)'], alpha=0.7, s=60)
-                ax.plot([0, df_filtered['f_exp (%)'].max()*1.1], [0, df_filtered['f_exp (%)'].max()*1.1], 'r--')
-                ax.set_xlabel('Эксперимент (%)')
-                ax.set_ylabel('Расчёт (%)')
-                ax.set_title('Сравнение (исключённые точки не учитываются)')
-                ax.grid(True, linestyle='--', alpha=0.5)
-                st.pyplot(fig)
+                df_filtered = df[df["Исключить"] == False].copy()
+                if df_filtered.empty:
+                    st.warning("Все строки исключены.")
+                else:
+                    df_filtered['f_calc (%)'] = df_filtered.apply(
+                        lambda row: f_sigma(row['t'], row['T'], row['G'], f_inf, k0, m, n, Q) * 100,
+                        axis=1
+                    )
+                    df_filtered['Ошибка (%)'] = np.abs(df_filtered['f_calc (%)'] - df_filtered['f_exp (%)'])
+                    st.dataframe(df_filtered.round(3))
+                    
+                    fig, ax = plt.subplots()
+                    ax.scatter(df_filtered['f_exp (%)'], df_filtered['f_calc (%)'], alpha=0.7, s=60)
+                    ax.plot([0, df_filtered['f_exp (%)'].max()*1.1], [0, df_filtered['f_exp (%)'].max()*1.1], 'r--')
+                    ax.set_xlabel('Эксперимент (%)')
+                    ax.set_ylabel('Расчёт (%)')
+                    ax.set_title('Сравнение (исключённые точки не учитываются)')
+                    ax.grid(True, linestyle='--', alpha=0.5)
+                    st.pyplot(fig)
 
 st.markdown("---")
 st.caption("""
 Модель основана на уравнении Аврами с учётом плотности границ зёрен по ГОСТ 5639–82.  
-Коэффициенты подобраны по экспериментальным данным для стали 12Х18Н12Т.  
+Коэффициенты подобраны по экспериментальным данным для стали 12Х18Н12Т (G=8,9,10).  
 Диапазон: 550–900 °C, время до 200 000 ч.
 """)
